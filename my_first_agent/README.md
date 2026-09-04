@@ -15,7 +15,7 @@ Sanya Kumar
 HackTrack
 
 ### System Goal
-For CPVC, an accurate attendance tool, measured by attendance-to-registration rate moving from 40% to 100%, without crossing privacy boundaries and initiating excessive communication.
+For CPVC, an accurate attendance prediction tool, measured by attendance-to-registration rate moving from 40% to 100%, without crossing privacy boundaries and initiating excessive communication.
 
 ### Who Is Better Off When This Works?
 

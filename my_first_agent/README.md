@@ -7,16 +7,16 @@
 
 ### System Designer Name
 
-[Sanya Kumar.]
+Sanya Kumar
 
 
 ### System Name
 
-[Use a default name "HackTrack" or enter the name you choose for the system.]
+HackTrack
 
 ### System Goal
-[For CPVC, an accurate attendance tool, measured by attendance-to-registration rate moving from 40% to 100%, without crossing privacy boundaries and initiating excessive communication.]
+For CPVC, an accurate attendance tool, measured by attendance-to-registration rate moving from 40% to 100%, without crossing privacy boundaries and initiating excessive communication.
 
 ### Who Is Better Off When This Works?
 
-[CPVC is better off when this works, as they will have a tool to get accurate headcounts, which will help them plan ahead for food, drinks, and swag. This will allow the club to use the budget efficiently.]
+CPVC is better off when this works, as they will have a tool to get accurate headcounts, which will help them plan ahead for food, drinks, and swag. This will allow the club to use the budget efficiently.

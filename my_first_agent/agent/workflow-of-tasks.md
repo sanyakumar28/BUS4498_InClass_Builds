@@ -8,15 +8,16 @@ This workflow supports the system goal defined in `my_first_agent/README.md`.
 
 ### 1.2 Workflow Trigger
 
-[Describe the event, request, schedule, or condition that starts the workflow.]
+A participant registers prior to the CPVC event.
 
 ### 1.3 Completion Condition at Runtime
 
-[Describe how the system knows, on any given run, that this workflow is completed.]
+When the participant attends the event.
 
 ### 1.4 General Workflow
 
 [Describe the overall sequence of tasks in one or two paragraphs. Explain the normal path first, followed by the most important exception paths and human-review points.]
+
 
 ### 1.5 Workflow Diagram
 

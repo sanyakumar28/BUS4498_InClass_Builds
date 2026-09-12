@@ -1,13 +1,5 @@
 # Plan Food Drinks and Swag Task Specification  
 
-Examples:
-
-- `Grade Item Condition` becomes `grade-item-condition.md`
-- `Customer Dispute & Compensation Assessment` becomes `customer-dispute-and-compensation-assessment.md`
-
-Keep the **exact** task ID and task name from `workflow-of-tasks.md` inside the file. Replace all bracketed prompts. Leave Section 3 empty; tool permissions and boundaries will be added next week. 
-
-*Remove this sentence and the instructions above before your submission.*
 
 ```yaml
 # BASIC INFORMATION

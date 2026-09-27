@@ -37,7 +37,7 @@ task_owner: CPVC
 
 - **Input name:** Historical resource outcomes
 - **What it contains:** Aggregate information from previous events, such as actual attendance, quantities purchased, leftovers, shortages, and total spending.
-- **Source:** Update aggregate forecast data or CPVC event records
+- **Source:** T12: Update aggregate forecast data or CPVC event records
 
 ## 3. Tool Permissions and Boundaries
 
@@ -57,50 +57,45 @@ The agent may not introduce any price, package size, inventory count, per-attend
 ### Permitted Subtask 1
 
 - **Subtask name:** Validate planning inputs
-- **Substask description:** Check whether the forecast, resource requirements, budget, inventory, and purchasing constraints are complete, current, and internally consistent.
+- ** Subtask description:** Check whether the forecast, resource requirements, budget, inventory, and purchasing constraints are complete, current, and internally consistent.
 - **Subtask boundary:** The agent may identify missing or conflicting information and apply permitted assumptions as defined above. It may not invent prices, quantities, inventory, or event requirements.
 - **Retry limits:** If information is missing, check approved CPVC planning records once. If it is still unavailable, or if a conflict cannot be resolved using the permitted assumptions, hand off to the CPVC event organizer.
 
 ### Permitted Subtask 2
 
 - **Subtask name:** Interpret attendance uncertainty
-- **Substask description:** Examine the low, likely, and high attendance estimates, the confidence level, and historical attendance accuracy to determine how much uncertainty should affect the supply buffer.
+- ** Subtask description:** Examine the low, likely, and high attendance estimates, the confidence level, and historical attendance accuracy to determine how much uncertainty should affect the supply buffer.
 - **Subtask boundary:** The agent may compare scenarios and explain risk tradeoffs, but it may not convert uncertainty into a guaranteed attendance number.
 - **Retry limits:** If the forecast is incomplete or its confidence level is missing, proceed using the available range and flag the unresolved uncertainty. Do not re-run the interpretation on the same data.
   
 ### Permitted Subtask 3
 
 - **Subtask name:** Calculate supply requirements
-- **Substask description:** Calculate food, drink, and swag quantities for each attendance scenario using approved per-attendee requirements, package sizes, current inventory, and purchasing constraints.
+- ** Subtask description:** Calculate food, drink, and swag quantities for each attendance scenario using approved per-attendee requirements, package sizes, current inventory, and purchasing constraints.
 - **Subtask boundary:** The agent may calculate and compare quantities, but it may not place an order or exceed the stated budget without organizer approval.
 - **Retry limits:** Recalculate up to 2 times only to fix calculation errors or internal inconsistencies, such as totals that do not match line items. If package sizes, prices, or per-attendee rates are missing, retrieve them from an approved source or escalate rather than retrying.
   
 ### Permitted Subtask 4
 
 - **Subtask name:** Compare planning scenarios
-- **Substask description:** Compare conservative, balanced, and budget-sensitive plans by estimated cost, shortage risk, expected leftovers, and participant impact.
+- ** Subtask description:** Compare conservative, balanced, and budget-sensitive plans by estimated cost, shortage risk, expected leftovers, and participant impact.
 - **Subtask boundary:** The agent may recommend a preferred scenario, but the organizer decides the acceptable tradeoff between waste and shortage risk.
-- **Retry limits:** Attempt up to 2 times before presenting the unresolved tradeoff to the organizer.
+- **Retry limits:** If a scenario exceeds the budget or the shortage and waste limits, first explore feasible alternatives, such as reducing the buffer toward the likely estimate, using more existing inventory, choosing different approved package sizes, or lowering swag quantities before food and drink quantities. These alternatives may never fall below organizer-provided requirements. Escalate only if no combination of approved options satisfies the budget, requirements, and shortage and waste limits, and present the closest feasible options and what each one gives up.
 
 ### Permitted Subtask 5
 
 - **Subtask name:** Prepare supply recommendation
-- **Substask description:** Combine the strongest available evidence into a recommended quantity for each supply category, and explain the assumptions behind the recommendation.
+- ** Subtask description:** Combine the strongest available evidence into a recommended quantity for each supply category, and explain the assumptions behind the recommendation.
 - **Subtask boundary:** The agent may create a draft recommendation for review, but it may not approve, purchase, or communicate the plan as final.
 - **Retry limits:** If any supply category cannot be completed, submit the partial recommendation with the gap clearly identified and escalate. Do not delay the other categories.
-
-**
 
 ## 5. When to Stop or Hand Off to a Human
 
 - **Stop successfully when:** The agent has produced a supply recommendation covering food, drinks, and swag. The recommendation includes quantities for each scenario, a selected scenario and buffer, labeled assumptions, and estimates of cost, shortage risk, and leftover risk, all prepared for organizer review.
-- **Hand off early when:** Required forecast or purchasing information is missing from both the inputs and approved records. Inputs conflict in ways the permitted assumptions cannot resolve. No feasible plan satisfies the budget and requirements after alternatives have been explored. Privacy boundaries would be crossed.
-A purchase, payment, participant communication, or final approval is required.
+- **Hand off early when:** Required forecast or purchasing information is missing from both the inputs and approved records. Inputs conflict in ways the permitted assumptions cannot resolve. No feasible plan satisfies the budget and requirements after alternatives have been explored. Privacy boundaries would be crossed. A purchase, payment, participant communication, or final approval is required.
 - **Hand off to:** CPVC event organizer or designated resource-planning reviewer.
 
-Stop at the first applicable budget limit or handoff condition. While awaiting review, take no further autonomous action.
-
-## 6. Outbound Deliverable
+Stop at the first applicable handoff condition. While awaiting review, take no further autonomous action.
 
 - **Status:** Completed or escalated to human.
 - **Result or recommendation:**  Recommended quantities for food, drinks, and swag, including the selected planning scenario and any proposed buffer.

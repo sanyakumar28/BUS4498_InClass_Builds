@@ -13,7 +13,7 @@ Sanya Kumar
 HackTrack
 
 ### System Goal
-For CPVC, an accurate attendance prediction tool, measured by attendance-to-registration rate moving from 40% to 100%, without crossing privacy boundaries and initiating excessive communication.
+For CPVC organizers, HackTrack provides an attendance forecast that lets the club buy the right amount of food, drinks, and swag without wasting its limited budget. Success is measured by the gap between forecast and actual attendance. The baseline is planning from registration counts, which at CPVC's roughly 40% attendance rate overstates attendance by about 2.5 times. The target is a likely forecast within 15% of actual check-ins. HackTrack stays within clear boundaries: it uses only aggregate attendance data, sends at most two reminders, and never purchases supplies or approves plans without an organizer.
 
 ### Who Is Better Off When This Works?
 

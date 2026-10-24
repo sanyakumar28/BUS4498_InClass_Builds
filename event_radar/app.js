@@ -22,7 +22,7 @@
   var postButton = document.getElementById("post-button");
   var resultBox = document.getElementById("result");
   var refreshButton = document.getElementById("refresh");
-  var chips = Array.prototype.slice.call(document.querySelectorAll(".chip"));
+  var foodOnlyButton = document.getElementById("food-only");
 
   var modBox = document.getElementById("mod");
   var signInForm = document.getElementById("sign-in-form");
@@ -244,12 +244,11 @@
 
   // ---------- filters and refresh ----------
 
-  chips.forEach(function (chip) {
-    chip.addEventListener("click", function () {
-      filter = chip.getAttribute("data-filter");
-      chips.forEach(function (c) { c.setAttribute("aria-pressed", String(c === chip)); });
-      renderBoard();
-    });
+  // "Free food only" turns on and off: on shows only events with free food, off shows everything.
+  foodOnlyButton.addEventListener("click", function () {
+    filter = filter === "food" ? "all" : "food";
+    foodOnlyButton.setAttribute("aria-pressed", String(filter === "food"));
+    renderBoard();
   });
 
   refreshButton.addEventListener("click", loadEvents);

@@ -9,6 +9,8 @@
   var AGENT_URL = (config.supabaseUrl || "") + "/functions/v1/submit-event";
   // Only the columns the website is allowed to read (see the Stage 4 grants).
   var COLUMNS = "id, created_at, status, title, club, event_date, start_time, end_time, place_name, place_detail, cost, free_food, summary, flyer_url";
+  // Signed-in moderators may also read the original post and the review notes (see the Stage 8 grants).
+  var MOD_COLUMNS = COLUMNS + ", announcement, status_reason, note_for_moderator";
   // Only show flyer photos stored in this project's "flyers" bucket.
   var FLYER_PREFIX = (config.supabaseUrl || "") + "/storage/v1/object/public/flyers/";
   var MAX_FLYER_BYTES = 5 * 1024 * 1024;
@@ -21,6 +23,16 @@
   var resultBox = document.getElementById("result");
   var refreshButton = document.getElementById("refresh");
   var chips = Array.prototype.slice.call(document.querySelectorAll(".chip"));
+
+  var modBox = document.getElementById("mod");
+  var signInForm = document.getElementById("sign-in-form");
+  var signInButton = document.getElementById("sign-in-button");
+  var signInResult = document.getElementById("sign-in-result");
+  var modPanel = document.getElementById("mod-panel");
+  var modWho = document.getElementById("mod-who");
+  var modResult = document.getElementById("mod-result");
+  var waitingBoard = document.getElementById("waiting-board");
+  var currentUser = null;
 
   var allEvents = [];
   var filter = "all";
@@ -163,17 +175,21 @@
     error: "Something went wrong",
   };
 
-  function showResult(kind, message, reasons) {
-    resultBox.className = "result " + kind;
-    resultBox.replaceChildren();
-    resultBox.appendChild(el("p", "result-label", LABELS[kind] || LABELS.error));
-    if (message) resultBox.appendChild(el("p", null, message));
+  function showResultIn(box, kind, label, message, reasons) {
+    box.className = "result " + kind;
+    box.replaceChildren();
+    box.appendChild(el("p", "result-label", label));
+    if (message) box.appendChild(el("p", null, message));
     if (reasons && reasons.length) {
       var list = el("ul", "reasons");
       reasons.forEach(function (reason) { list.appendChild(el("li", null, reason)); });
-      resultBox.appendChild(list);
+      box.appendChild(list);
     }
-    resultBox.hidden = false;
+    box.hidden = false;
+  }
+
+  function showResult(kind, message, reasons) {
+    showResultIn(resultBox, kind, LABELS[kind] || LABELS.error, message, reasons);
   }
 
   form.addEventListener("submit", async function (e) {
@@ -237,6 +253,130 @@
   });
 
   refreshButton.addEventListener("click", loadEvents);
+
+  // ---------- moderators ----------
+  // New sign-ups are turned off in Supabase, so only accounts made by hand can sign in.
+
+  function reviewCard(event) {
+    var li = eventCard(event);
+    var review = el("div", "review");
+    review.appendChild(el("p", "why", event.status_reason || "Waiting for a moderator."));
+    if (event.note_for_moderator) review.appendChild(el("p", null, "Note from the agent: " + event.note_for_moderator));
+    review.appendChild(el("p", "original", event.announcement));
+
+    var actions = el("p", "actions");
+    var approve = el("button", null, "Approve");
+    approve.type = "button";
+    var reject = el("button", "ghost", "Reject");
+    reject.type = "button";
+    approve.addEventListener("click", function () { reviewPost(event, "published", [approve, reject]); });
+    reject.addEventListener("click", function () { reviewPost(event, "rejected", [approve, reject]); });
+    actions.appendChild(approve);
+    actions.appendChild(reject);
+    review.appendChild(actions);
+
+    li.querySelector(".event-body").appendChild(review);
+    return li;
+  }
+
+  async function reviewPost(event, status, buttons) {
+    buttons.forEach(function (b) { b.disabled = true; });
+    var response = await db
+      .from("events")
+      .update({
+        status: status,
+        status_reason: status === "published" ? "Approved by a moderator." : "Rejected by a moderator.",
+        reviewed_at: new Date().toISOString(),
+        reviewed_by: currentUser ? currentUser.email : "",
+      })
+      .eq("id", event.id)
+      .eq("status", "waiting")
+      .select("id");
+
+    if (response.error) {
+      console.error("Review failed:", response.error);
+      var message = response.error.code === "23505"
+        ? "Another live post already has the same date, start time, and place. Reject this one instead."
+        : "Couldn't save your decision. Please try again.";
+      showResultIn(modResult, "error", "Not saved", message);
+      buttons.forEach(function (b) { b.disabled = false; });
+      return;
+    }
+    if (!response.data || !response.data.length) {
+      showResultIn(modResult, "duplicate", "Already reviewed", "Someone already reviewed this post.");
+    } else {
+      showResultIn(modResult, status === "published" ? "published" : "rejected",
+        status === "published" ? "Approved" : "Rejected",
+        status === "published" ? "The post is on the website now." : "The post won't appear on the website.");
+    }
+    loadWaiting();
+    loadEvents();
+  }
+
+  async function loadWaiting() {
+    if (!currentUser) return;
+    var response = await db
+      .from("events")
+      .select(MOD_COLUMNS)
+      .eq("status", "waiting")
+      .order("created_at", { ascending: true });
+    if (response.error) {
+      console.error("Couldn't load waiting posts:", response.error);
+      waitingBoard.replaceChildren(el("li", "empty", "Couldn't load waiting posts. Try Refresh."));
+      return;
+    }
+    var rows = response.data || [];
+    if (!rows.length) {
+      waitingBoard.replaceChildren(el("li", "empty", "Nothing is waiting. All caught up!"));
+      return;
+    }
+    waitingBoard.replaceChildren.apply(waitingBoard, rows.map(reviewCard));
+  }
+
+  function showSignedIn(user) {
+    currentUser = user;
+    signInForm.hidden = !!user;
+    modPanel.hidden = !user;
+    modResult.hidden = true;
+    if (user) {
+      modWho.textContent = "Signed in as " + (user.email || "a moderator");
+      modBox.open = true;
+      loadWaiting();
+    } else {
+      waitingBoard.replaceChildren();
+    }
+  }
+
+  if (db) {
+    signInForm.addEventListener("submit", async function (e) {
+      e.preventDefault();
+      signInButton.disabled = true;
+      signInResult.hidden = true;
+      var response = await db.auth.signInWithPassword({
+        email: document.getElementById("mod-email").value.trim(),
+        password: document.getElementById("mod-password").value,
+      });
+      signInButton.disabled = false;
+      if (response.error) {
+        showResultIn(signInResult, "error", "Couldn't sign in", "Check your email and password.");
+        return;
+      }
+      document.getElementById("mod-password").value = "";
+      showSignedIn(response.data.user);
+    });
+
+    document.getElementById("sign-out").addEventListener("click", async function () {
+      await db.auth.signOut();
+      showSignedIn(null);
+    });
+
+    document.getElementById("mod-refresh").addEventListener("click", loadWaiting);
+
+    db.auth.getSession().then(function (result) {
+      var session = result.data && result.data.session;
+      if (session) showSignedIn(session.user);
+    });
+  }
 
   loadEvents();
 })();

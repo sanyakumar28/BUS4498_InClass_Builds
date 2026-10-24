@@ -55,6 +55,34 @@
   </section>
 </main>
 
+<div class="wrap">
+  <details class="card mod" id="mod">
+    <summary>Moderator sign-in</summary>
+
+    <form id="sign-in-form">
+      <label for="mod-email">Email</label>
+      <input type="email" id="mod-email" name="email" autocomplete="username" required>
+      <label for="mod-password">Password</label>
+      <input type="password" id="mod-password" name="password" autocomplete="current-password" required>
+      <button type="submit" id="sign-in-button">Sign in</button>
+      <div id="sign-in-result" hidden></div>
+    </form>
+
+    <div id="mod-panel" hidden>
+      <div class="board-head">
+        <p class="muted" id="mod-who"></p>
+        <p class="actions">
+          <button type="button" class="ghost" id="mod-refresh">Refresh</button>
+          <button type="button" class="ghost" id="sign-out">Sign out</button>
+        </p>
+      </div>
+      <h2>Waiting for review</h2>
+      <div id="mod-result" hidden></div>
+      <ul class="board" id="waiting-board" aria-live="polite"></ul>
+    </div>
+  </details>
+</div>
+
 <footer class="wrap foot">
   <p>A BUS 4498 practice build. Every club and event in the sample posts is made up. These are practice rules, not Cal Poly or ASI policy.</p>
 </footer>

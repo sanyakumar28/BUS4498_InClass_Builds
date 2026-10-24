@@ -8,11 +8,15 @@
   var config = window.EVENT_RADAR_CONFIG || {};
   var AGENT_URL = (config.supabaseUrl || "") + "/functions/v1/submit-event";
   // Only the columns the website is allowed to read (see the Stage 4 grants).
-  var COLUMNS = "id, created_at, status, title, club, event_date, start_time, end_time, place_name, place_detail, cost, free_food, summary";
+  var COLUMNS = "id, created_at, status, title, club, event_date, start_time, end_time, place_name, place_detail, cost, free_food, summary, flyer_url";
+  // Only show flyer photos stored in this project's "flyers" bucket.
+  var FLYER_PREFIX = (config.supabaseUrl || "") + "/storage/v1/object/public/flyers/";
+  var MAX_FLYER_BYTES = 5 * 1024 * 1024;
 
   var board = document.getElementById("board");
   var form = document.getElementById("post-form");
   var textarea = document.getElementById("announcement");
+  var flyerInput = document.getElementById("flyer");
   var postButton = document.getElementById("post-button");
   var resultBox = document.getElementById("result");
   var refreshButton = document.getElementById("refresh");
@@ -98,6 +102,14 @@
     if (tags.childNodes.length) body.appendChild(tags);
 
     li.appendChild(body);
+
+    if (config.supabaseUrl && typeof event.flyer_url === "string" && event.flyer_url.indexOf(FLYER_PREFIX) === 0) {
+      var img = el("img", "flyer");
+      img.src = event.flyer_url;
+      img.alt = "Flyer for " + (event.title || "this event");
+      img.loading = "lazy";
+      li.appendChild(img);
+    }
     return li;
   }
 
@@ -171,6 +183,15 @@
       showResult("error", "Please paste an announcement first.");
       return;
     }
+    var flyer = flyerInput.files && flyerInput.files[0];
+    if (flyer && flyer.type !== "image/jpeg" && flyer.type !== "image/png") {
+      showResult("error", "The photo must be a JPG or PNG.");
+      return;
+    }
+    if (flyer && flyer.size > MAX_FLYER_BYTES) {
+      showResult("error", "The photo is over 5 MB. Please use a smaller one.");
+      return;
+    }
 
     postButton.disabled = true;
     postButton.textContent = "The agent is reading your post…";
@@ -178,6 +199,7 @@
     try {
       var body = new FormData();
       body.append("announcement", text);
+      if (flyer) body.append("flyer", flyer);
       var res = await fetch(AGENT_URL, {
         method: "POST",
         headers: { apikey: config.publishableKey },
@@ -189,10 +211,11 @@
         showResult("error", (data && data.message) || "The agent didn't answer. Please try again in a minute.");
       } else {
         showResult(data.status, data.message, data.reasons);
-        if (data.status === "published") {
+        if (data.status === "published" || data.status === "waiting") {
           textarea.value = "";
-          loadEvents();
+          flyerInput.value = "";
         }
+        if (data.status === "published") loadEvents();
       }
     } catch (err) {
       console.error("Post failed:", err);

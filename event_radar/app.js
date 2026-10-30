@@ -1,381 +1,390 @@
-// Club Event Radar: the website's code.
-// It lists published events from the database and sends new announcements to the AI agent.
-// All text from posts is shown with textContent, never innerHTML.
-
+// Club Event Radar: the website. It runs in each visitor's browser (GitHub Pages only serves it).
+// It reads published events from the database, refreshes itself every few seconds, and sends new posts
+// to the AI agent. It knows only the project address and the publishable key, so it can do only what
+// the security rules allow.
 (function () {
   "use strict";
+  var cfg = window.EVENT_RADAR_CONFIG || {};
+  var $ = function (id) { return document.getElementById(id); };
+  var qa = function (sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); };
 
-  var config = window.EVENT_RADAR_CONFIG || {};
-  var AGENT_URL = (config.supabaseUrl || "") + "/functions/v1/submit-event";
-  // Only the columns the website is allowed to read (see the Stage 4 grants).
-  var COLUMNS = "id, created_at, status, title, club, event_date, start_time, end_time, place_name, place_detail, cost, free_food, summary, flyer_url";
-  // Signed-in moderators may also read the original post and the review notes (see the Stage 8 grants).
-  var MOD_COLUMNS = COLUMNS + ", announcement, status_reason, note_for_moderator";
-  // Only show flyer photos stored in this project's "flyers" bucket.
-  var FLYER_PREFIX = (config.supabaseUrl || "") + "/storage/v1/object/public/flyers/";
-  var MAX_FLYER_BYTES = 5 * 1024 * 1024;
-
-  var board = document.getElementById("board");
-  var form = document.getElementById("post-form");
-  var textarea = document.getElementById("announcement");
-  var flyerInput = document.getElementById("flyer");
-  var postButton = document.getElementById("post-button");
-  var resultBox = document.getElementById("result");
-  var refreshButton = document.getElementById("refresh");
-  var foodOnlyButton = document.getElementById("food-only");
-
-  var modBox = document.getElementById("mod");
-  var signInForm = document.getElementById("sign-in-form");
-  var signInButton = document.getElementById("sign-in-button");
-  var signInResult = document.getElementById("sign-in-result");
-  var modPanel = document.getElementById("mod-panel");
-  var modWho = document.getElementById("mod-who");
-  var modResult = document.getElementById("mod-result");
-  var waitingBoard = document.getElementById("waiting-board");
-  var currentUser = null;
-
-  var allEvents = [];
-  var filter = "all";
-
-  var db = null;
-  if (window.supabase && config.supabaseUrl && config.publishableKey) {
-    db = window.supabase.createClient(config.supabaseUrl, config.publishableKey);
+  if (!cfg.supabaseUrl || /YOUR-PROJECT-REF/.test(cfg.supabaseUrl) || !cfg.publishableKey || /YOUR-KEY/.test(cfg.publishableKey)) {
+    $("boardStatus").textContent = "Add your Project URL and publishable key to config.js first.";
+    return;
+  }
+  if (/^sb_secret_/.test(cfg.publishableKey)) {
+    $("boardStatus").textContent = "Stop: config.js holds the secret key. Replace it with the publishable key, then create a new secret key in Supabase.";
+    return;
   }
 
-  // ---------- small helpers ----------
+  var baseUrl = cfg.supabaseUrl.replace(/\/+$/, "");
+  var db = window.supabase.createClient(baseUrl, cfg.publishableKey);
+  var AGENT_URL = baseUrl + "/functions/v1/submit-event";
+  var REFRESH_MS = 15000; // the board checks for new posts this often while the tab is open
+  // The website may read only these columns (the menu), never the raw announcement or moderator notes.
+  var PUBLIC_COLUMNS = [
+    "id", "created_at", "title", "club", "event_date", "start_time", "end_time", "place_name", "place_detail", "cost", "free_food", "summary",
+    "flyer_url",
+  ].join(",");
 
-  function el(tag, className, text) {
-    var node = document.createElement(tag);
-    if (className) node.className = className;
-    if (text !== undefined && text !== null) node.textContent = text;
-    return node;
+  /* ---------- small helpers ---------- */
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text; // always textContent: posts are typed by strangers
+    return e;
+  }
+  function parseDate(d) { var p = d.split("-"); return new Date(+p[0], +p[1] - 1, +p[2]); }
+  function fmtDate(d) { return d ? parseDate(d).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }) : "Date to be announced"; }
+  function fmtDayHead(d) { return d ? parseDate(d).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" }) : "Date to be announced"; }
+  function fmtTime(t) {
+    if (!t) return "";
+    var p = t.split(":"), h = +p[0], ap = h >= 12 ? "PM" : "AM";
+    return (h % 12 || 12) + ":" + p[1] + " " + ap;
+  }
+  function today() { var t = new Date(); return new Date(t.getFullYear(), t.getMonth(), t.getDate()); }
+  function isThisWeek(d) { if (!d) return false; var diff = (parseDate(d) - today()) / 86400000; return diff >= 0 && diff < 7; }
+  function isRecent(iso) { return iso && (Date.now() - Date.parse(iso)) < 5 * 60 * 1000; }
+  var toastTimer = null;
+  function toast(msg) {
+    var t = $("toast"); t.textContent = msg; t.className = "toast show";
+    clearTimeout(toastTimer); toastTimer = setTimeout(function () { t.className = "toast"; }, 2400);
+  }
+  // What the agent looked at before it decided: the club list, the club's earlier posts, the lessons.
+  function memo(lines) {
+    if (!lines || !lines.length) return null;
+    var box = el("div", "memo");
+    box.appendChild(el("p", "memo-title", "What the agent looked at"));
+    var ul = el("ul");
+    lines.forEach(function (l) { ul.appendChild(el("li", null, l)); });
+    box.appendChild(ul);
+    return box;
   }
 
-  function parseDate(iso) {
-    if (!iso) return null;
-    var parts = iso.split("-").map(Number);
-    return new Date(parts[0], parts[1] - 1, parts[2]);
+  /* ---------- drawers: the menu's add-ons slide in from the right ---------- */
+  var openId = null;
+  function openDrawer(id) {
+    closeDrawer();
+    var d = $(id); if (!d) return;
+    d.hidden = false; $("scrim").hidden = false; openId = id;
+    var first = d.querySelector("textarea, input:not([type=hidden])"); if (first) first.focus();
   }
-
-  function formatTime(value) {
-    if (!value) return "";
-    var parts = value.split(":").map(Number);
-    var hours = parts[0];
-    var minutes = parts[1] || 0;
-    var suffix = hours >= 12 ? "PM" : "AM";
-    var h12 = hours % 12 === 0 ? 12 : hours % 12;
-    return h12 + ":" + String(minutes).padStart(2, "0") + " " + suffix;
+  function closeDrawer() {
+    if (!openId) return;
+    $(openId).hidden = true; $("scrim").hidden = true; openId = null;
   }
+  $("openPost").addEventListener("click", function () { openDrawer("postDrawer"); });
+  $("scrim").addEventListener("click", closeDrawer);
+  qa("[data-close]").forEach(function (b) { b.addEventListener("click", closeDrawer); });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeDrawer(); });
 
-  function whenText(event) {
-    var pieces = [];
-    var date = parseDate(event.event_date);
-    if (date) {
-      pieces.push(date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }));
-    } else {
-      pieces.push("Date to be announced");
-    }
-    var start = formatTime(event.start_time);
-    var end = formatTime(event.end_time);
-    if (start && end) pieces.push(start + " to " + end);
-    else if (start) pieces.push(start);
-    return pieces.join(" · ");
+  /* ---------- one event card: date badge, details, and (from Stage 7) the flyer ---------- */
+  function dateBadge(d) {
+    var box = el("div", "date");
+    if (!d) { box.className = "date tba"; box.appendChild(el("span", "day-num", "TBA")); return box; }
+    var day = parseDate(d);
+    box.appendChild(el("span", "mon", day.toLocaleDateString("en-US", { month: "short" })));
+    box.appendChild(el("span", "day-num", String(day.getDate())));
+    return box;
   }
-
-  // ---------- the event list ----------
-
-  function eventCard(event) {
-    var li = el("li", "event");
-
-    var date = parseDate(event.event_date);
-    var dateBox;
-    if (date) {
-      dateBox = el("div", "date");
-      dateBox.appendChild(el("span", "mon", date.toLocaleDateString("en-US", { month: "short" })));
-      dateBox.appendChild(el("span", "day", String(date.getDate())));
-    } else {
-      dateBox = el("div", "date tba");
-      dateBox.appendChild(el("span", "day", "TBA"));
-    }
-    li.appendChild(dateBox);
-
+  function card(ev, extra) {
+    var li = el("article", "event");
+    li.appendChild(dateBadge(ev.event_date));
     var body = el("div", "event-body");
-    body.appendChild(el("p", "when", whenText(event)));
-    body.appendChild(el("h3", null, event.title || "Untitled event"));
-
-    var place = [event.place_name, event.place_detail].filter(Boolean).join(", ");
-    var meta = [event.club, place].filter(Boolean).join(" · ");
+    var time = ev.start_time ? fmtTime(ev.start_time) + (ev.end_time ? " to " + fmtTime(ev.end_time) : "") : "Time to be announced";
+    body.appendChild(el("p", "when", fmtDate(ev.event_date) + " · " + time));
+    body.appendChild(el("h3", null, ev.title || "Untitled event"));
+    var where = [ev.place_name, ev.place_detail].filter(Boolean).join(", ");
+    var meta = [ev.club, where].filter(Boolean).join(" · ");
     if (meta) body.appendChild(el("p", "meta", meta));
-    if (event.summary) body.appendChild(el("p", "summary", event.summary));
-
+    if (ev.summary) body.appendChild(el("p", "summary", ev.summary));
     var tags = el("p", "tags");
-    if (event.cost) tags.appendChild(el("span", "tag", event.cost));
-    if (event.free_food) tags.appendChild(el("span", "tag food", "🍕 Free food"));
+    if (ev.cost) tags.appendChild(el("span", "tag", ev.cost));
+    if (ev.free_food) tags.appendChild(el("span", "tag food", "🍕 Free food"));
+    if (ev.place_name === "Online") tags.appendChild(el("span", "tag", "💻 Online"));
     if (tags.childNodes.length) body.appendChild(tags);
-
+    if (extra) body.appendChild(extra);
     li.appendChild(body);
-
-    if (config.supabaseUrl && typeof event.flyer_url === "string" && event.flyer_url.indexOf(FLYER_PREFIX) === 0) {
+    if (ev.flyer_url && ev.flyer_url.indexOf(baseUrl + "/storage/v1/object/public/flyers/") === 0) {
       var img = el("img", "flyer");
-      img.src = event.flyer_url;
-      img.alt = "Flyer for " + (event.title || "this event");
+      img.src = ev.flyer_url;
+      img.alt = "Flyer for " + (ev.title || "this event");
       img.loading = "lazy";
       li.appendChild(img);
     }
     return li;
   }
 
-  function showMessage(text) {
-    board.replaceChildren(el("li", "empty", text));
+  /* ---------- the board: published events, grouped by day, refreshed by itself ---------- */
+  var events = [], filter = "all", seen = null;
+  function visible() {
+    return events.filter(function (ev) {
+      if (filter === "week") return isThisWeek(ev.event_date);
+      if (filter === "food") return ev.free_food;
+      if (filter === "online") return ev.place_name === "Online";
+      return true;
+    });
   }
-
   function renderBoard() {
-    var shown = allEvents.filter(function (event) {
-      return filter === "food" ? event.free_food : true;
-    });
+    var list = $("board"), shown = visible(), i = 0;
+    list.textContent = "";
     if (!shown.length) {
-      showMessage(filter === "food" && allEvents.length
-        ? "No events with free food right now."
-        : "No events yet. Post the first one!");
-      return;
+      var empty = el("div", "empty");
+      empty.appendChild(el("b", null, events.length ? "Nothing matches this filter." : "No events yet."));
+      empty.appendChild(el("span", null, events.length ? "Try another filter." : "Post one in the club chat, and it shows up here."));
+      list.appendChild(empty);
     }
-    board.replaceChildren.apply(board, shown.map(eventCard));
+    var groups = {}, order = [];
+    shown.forEach(function (ev) { var k = ev.event_date || ""; if (!groups[k]) { groups[k] = []; order.push(k); } groups[k].push(ev); });
+    order.forEach(function (k) {
+      var day = el("section", "day"), head = el("div", "day-head");
+      head.appendChild(el("h2", null, fmtDayHead(k)));
+      head.appendChild(el("span", "n", groups[k].length + (groups[k].length === 1 ? " event" : " events")));
+      day.appendChild(head);
+      groups[k].forEach(function (ev) {
+        var c = card(ev);
+        c.style.setProperty("--i", String(i++));
+        if (seen && !seen[ev.id] && isRecent(ev.created_at)) c.classList.add("new");
+        day.appendChild(c);
+      });
+      list.appendChild(day);
+    });
+    $("statCount").textContent = String(events.length);
+    $("statWeek").textContent = String(events.filter(function (ev) { return isThisWeek(ev.event_date); }).length);
+    $("statFood").textContent = String(events.filter(function (ev) { return ev.free_food; }).length);
+    $("boardStatus").textContent = shown.length ? shown.length + (shown.length === 1 ? " event" : " events") + (filter !== "all" ? " shown" : "") : "";
   }
-
-  async function loadEvents() {
-    if (!db) {
-      showMessage("The website isn't connected to Supabase yet. Check config.js.");
-      return;
-    }
-    refreshButton.disabled = true;
-    var response = await db
-      .from("events")
-      .select(COLUMNS)
-      .eq("status", "published")
+  function loadBoard(quiet) {
+    if (!quiet) $("boardStatus").textContent = "Loading…";
+    $("live").classList.add("busy");
+    return db.from("events").select(PUBLIC_COLUMNS).eq("status", "published")
       .order("event_date", { ascending: true, nullsFirst: false })
-      .order("start_time", { ascending: true, nullsFirst: false });
-    refreshButton.disabled = false;
-
-    if (response.error) {
-      console.error("Couldn't load events:", response.error);
-      showMessage("Couldn't load events right now. Try Refresh in a minute.");
-      return;
-    }
-    allEvents = response.data || [];
-    renderBoard();
+      .order("start_time", { ascending: true, nullsFirst: false })
+      .then(function (res) {
+        $("live").classList.remove("busy");
+        if (res.error) { $("boardStatus").textContent = "Couldn't load events: " + res.error.message; return; }
+        var changed = res.data.length !== events.length || res.data.some(function (ev, k) { return !events[k] || events[k].id !== ev.id; });
+        if (!changed && quiet) return;
+        var before = seen; seen = {};
+        res.data.forEach(function (ev) { seen[ev.id] = true; });
+        var fresh = res.data.filter(function (ev) { return before && !before[ev.id] && isRecent(ev.created_at); }).length;
+        events = res.data;
+        var keep = seen; seen = before; renderBoard(); seen = keep;
+        if (fresh) toast(fresh === 1 ? "A new event just arrived" : fresh + " new events just arrived");
+      });
   }
+  $("refreshBtn").addEventListener("click", function () { loadBoard(false); });
+  qa("#filters .chip").forEach(function (b) {
+    b.addEventListener("click", function () {
+      filter = b.getAttribute("data-filter");
+      qa("#filters .chip").forEach(function (o) { o.setAttribute("aria-pressed", String(o === b)); });
+      renderBoard();
+    });
+  });
+  setInterval(function () { if (document.visibilityState === "visible" && !openId) loadBoard(true); }, REFRESH_MS);
+  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") loadBoard(true); });
 
-  // ---------- posting to the agent ----------
-
-  var LABELS = {
-    published: "Posted!",
-    waiting: "Waiting for a moderator",
-    rejected: "Not posted",
-    duplicate: "Already posted",
-    error: "Something went wrong",
-  };
-
-  function showResultIn(box, kind, label, message, reasons) {
-    box.className = "result " + kind;
-    box.replaceChildren();
-    box.appendChild(el("p", "result-label", label));
-    if (message) box.appendChild(el("p", null, message));
-    if (reasons && reasons.length) {
-      var list = el("ul", "reasons");
-      reasons.forEach(function (reason) { list.appendChild(el("li", null, reason)); });
-      box.appendChild(list);
-    }
+  /* ---------- posting by hand: send it to the AI agent ---------- */
+  var LABELS = { published: "Published", waiting: "Waiting for a moderator", rejected: "Not posted", duplicate: "Already posted", error: "Something went wrong" };
+  function showResult(data) {
+    var box = $("postResult"), kind = data.ok ? data.status : "error";
     box.hidden = false;
+    box.className = "result " + kind;
+    box.textContent = "";
+    box.appendChild(el("p", "result-label", LABELS[kind] || kind));
+    box.appendChild(el("p", null, data.message || ""));
+    if (data.reasons && data.reasons.length) {
+      var ul = el("ul", "reasons");
+      data.reasons.forEach(function (r) { ul.appendChild(el("li", null, r)); });
+      box.appendChild(ul);
+    }
+    if (data.event && data.status !== "rejected") box.appendChild(card(data.event));
+    var looked = memo(data.looked_at);
+    if (looked) box.appendChild(looked);
   }
-
-  function showResult(kind, message, reasons) {
-    showResultIn(resultBox, kind, LABELS[kind] || LABELS.error, message, reasons);
-  }
-
-  form.addEventListener("submit", async function (e) {
+  $("postForm").addEventListener("submit", function (e) {
     e.preventDefault();
-    var text = textarea.value.trim();
-    if (!text) {
-      showResult("error", "Please paste an announcement first.");
-      return;
-    }
-    var flyer = flyerInput.files && flyerInput.files[0];
-    if (flyer && flyer.type !== "image/jpeg" && flyer.type !== "image/png") {
-      showResult("error", "The photo must be a JPG or PNG.");
-      return;
-    }
-    if (flyer && flyer.size > MAX_FLYER_BYTES) {
-      showResult("error", "The photo is over 5 MB. Please use a smaller one.");
-      return;
-    }
-
-    postButton.disabled = true;
-    postButton.textContent = "The agent is reading your post…";
-
-    try {
-      var body = new FormData();
-      body.append("announcement", text);
-      if (flyer) body.append("flyer", flyer);
-      var res = await fetch(AGENT_URL, {
-        method: "POST",
-        headers: { apikey: config.publishableKey },
-        body: body,
-      });
-      var data = await res.json().catch(function () { return null; });
-
-      if (!data || !data.ok) {
-        showResult("error", (data && data.message) || "The agent didn't answer. Please try again in a minute.");
-      } else {
-        showResult(data.status, data.message, data.reasons);
-        if (data.status === "published" || data.status === "waiting") {
-          textarea.value = "";
-          flyerInput.value = "";
-        }
-        if (data.status === "published") loadEvents();
-      }
-    } catch (err) {
-      console.error("Post failed:", err);
-      showResult("error", "Couldn't reach the agent. Check your internet connection and try again.");
-    } finally {
-      postButton.disabled = false;
-      postButton.textContent = "Send to the agent";
-    }
-  });
-
-  // ---------- filters and refresh ----------
-
-  // "Free food only" turns on and off: on shows only events with free food, off shows everything.
-  foodOnlyButton.addEventListener("click", function () {
-    filter = filter === "food" ? "all" : "food";
-    foodOnlyButton.setAttribute("aria-pressed", String(filter === "food"));
-    renderBoard();
-  });
-
-  refreshButton.addEventListener("click", loadEvents);
-
-  // ---------- moderators ----------
-  // New sign-ups are turned off in Supabase, so only accounts made by hand can sign in.
-
-  function reviewCard(event) {
-    var li = eventCard(event);
-    var review = el("div", "review");
-    review.appendChild(el("p", "why", event.status_reason || "Waiting for a moderator."));
-    if (event.note_for_moderator) review.appendChild(el("p", null, "Note from the agent: " + event.note_for_moderator));
-    review.appendChild(el("p", "original", event.announcement));
-
-    var actions = el("p", "actions");
-    var approve = el("button", null, "Approve");
-    approve.type = "button";
-    var reject = el("button", "ghost", "Reject");
-    reject.type = "button";
-    approve.addEventListener("click", function () { reviewPost(event, "published", [approve, reject]); });
-    reject.addEventListener("click", function () { reviewPost(event, "rejected", [approve, reject]); });
-    actions.appendChild(approve);
-    actions.appendChild(reject);
-    review.appendChild(actions);
-
-    li.querySelector(".event-body").appendChild(review);
-    return li;
-  }
-
-  async function reviewPost(event, status, buttons) {
-    buttons.forEach(function (b) { b.disabled = true; });
-    var response = await db
-      .from("events")
-      .update({
-        status: status,
-        status_reason: status === "published" ? "Approved by a moderator." : "Rejected by a moderator.",
-        reviewed_at: new Date().toISOString(),
-        reviewed_by: currentUser ? currentUser.email : "",
+    var form = $("postForm"), btn = $("postBtn");
+    var photo = $("flyer").files[0];
+    if (photo && photo.size > 5 * 1024 * 1024) { showResult({ ok: false, message: "The photo must be 5 MB or smaller." }); return; }
+    btn.disabled = true;
+    btn.textContent = "The agent is reading it…";
+    // The publishable key goes on the apikey header only (never as an Authorization bearer token).
+    fetch(AGENT_URL, { method: "POST", headers: { apikey: cfg.publishableKey }, body: new FormData(form) })
+      .then(function (r) {
+        return r.json().catch(function () { return { ok: false, message: "The agent didn't answer (" + r.status + "). Is the function deployed?" }; });
       })
-      .eq("id", event.id)
-      .eq("status", "waiting")
-      .select("id");
+      .then(function (data) {
+        showResult(data);
+        if (data.ok) { form.reset(); loadBoard(true); }
+      })
+      .catch(function () { showResult({ ok: false, message: "Couldn't reach the agent. Check your internet connection and the Project URL in config.js." }); })
+      .then(function () { btn.disabled = false; btn.textContent = "Post it"; });
+  });
 
-    if (response.error) {
-      console.error("Review failed:", response.error);
-      var message = response.error.code === "23505"
-        ? "Another live post already has the same date, start time, and place. Reject this one instead."
-        : "Couldn't save your decision. Please try again.";
-      showResultIn(modResult, "error", "Not saved", message);
-      buttons.forEach(function (b) { b.disabled = false; });
-      return;
-    }
-    if (!response.data || !response.data.length) {
-      showResultIn(modResult, "duplicate", "Already reviewed", "Someone already reviewed this post.");
-    } else {
-      showResultIn(modResult, status === "published" ? "published" : "rejected",
-        status === "published" ? "Approved" : "Rejected",
-        status === "published" ? "The post is on the website now." : "The post won't appear on the website.");
-    }
-    loadWaiting();
-    loadEvents();
-  }
+  // Say who drafts the cards (a quick check that doesn't call the AI).
+  fetch(AGENT_URL, { headers: { apikey: cfg.publishableKey } })
+    .then(function (r) { return r.json(); })
+    .then(function (d) { if (d && d.ai) $("aiNote").textContent = "Event cards are drafted by an AI agent, " + d.ai + ", and checked against the posting rules."; })
+    .catch(function () { /* the website still works without this note */ });
 
-  async function loadWaiting() {
-    if (!currentUser) return;
-    var response = await db
-      .from("events")
-      .select(MOD_COLUMNS)
-      .eq("status", "waiting")
-      .order("created_at", { ascending: true });
-    if (response.error) {
-      console.error("Couldn't load waiting posts:", response.error);
-      waitingBoard.replaceChildren(el("li", "empty", "Couldn't load waiting posts. Try Refresh."));
-      return;
-    }
-    var rows = response.data || [];
-    if (!rows.length) {
-      waitingBoard.replaceChildren(el("li", "empty", "Nothing is waiting. All caught up!"));
-      return;
-    }
-    waitingBoard.replaceChildren.apply(waitingBoard, rows.map(reviewCard));
-  }
-
-  function showSignedIn(user) {
-    currentUser = user;
-    signInForm.hidden = !!user;
-    modPanel.hidden = !user;
-    modResult.hidden = true;
-    if (user) {
-      modWho.textContent = "Signed in as " + (user.email || "a moderator");
-      modBox.open = true;
+  /* ---------- moderator: sign-in, the review queue, and the tools ---------- */
+  var session = null;
+  $("openMod").addEventListener("click", function () { openDrawer("modDrawer"); });
+  qa(".tab").forEach(function (t) {
+    t.addEventListener("click", function () {
+      qa(".tab").forEach(function (o) { o.setAttribute("aria-selected", String(o === t)); });
+      qa(".tabpanel").forEach(function (p) { p.hidden = p.getAttribute("data-panel") !== t.getAttribute("data-tab"); });
+    });
+  });
+  function renderMod() {
+    $("signInForm").hidden = Boolean(session);
+    $("modArea").hidden = !session;
+    if (session) {
+      $("modWho").textContent = session.user.email;
       loadWaiting();
-    } else {
-      waitingBoard.replaceChildren();
+      loadLessons();
     }
   }
-
-  if (db) {
-    signInForm.addEventListener("submit", async function (e) {
-      e.preventDefault();
-      signInButton.disabled = true;
-      signInResult.hidden = true;
-      var response = await db.auth.signInWithPassword({
-        email: document.getElementById("mod-email").value.trim(),
-        password: document.getElementById("mod-password").value,
+  function review(ev, status) {
+    var stamp = { reviewed_at: new Date().toISOString(), reviewed_by: session.user.email };
+    db.from("events")
+      .update({ status: status, reviewed_at: stamp.reviewed_at, reviewed_by: stamp.reviewed_by })
+      .eq("id", ev.id)
+      .then(function (res) {
+        if (res.error) { $("waitingStatus").textContent = "Couldn't save that: " + res.error.message; return; }
+        // Approving an update retires the post it replaces, so the website never shows both.
+        if (status === "published" && ev.updates_id) {
+          return db.from("events")
+            .update({ status: "replaced", status_reason: "Replaced by a newer post the moderator approved.", reviewed_at: stamp.reviewed_at, reviewed_by: stamp.reviewed_by })
+            .eq("id", ev.updates_id).in("status", ["published", "waiting"]);
+        }
+      })
+      .then(function () {
+        toast(status === "published" ? "Approved and posted" : "Rejected");
+        loadWaiting();
+        loadBoard(true);
       });
-      signInButton.disabled = false;
-      if (response.error) {
-        showResultIn(signInResult, "error", "Couldn't sign in", "Check your email and password.");
-        return;
-      }
-      document.getElementById("mod-password").value = "";
-      showSignedIn(response.data.user);
-    });
-
-    document.getElementById("sign-out").addEventListener("click", async function () {
-      await db.auth.signOut();
-      showSignedIn(null);
-    });
-
-    document.getElementById("mod-refresh").addEventListener("click", loadWaiting);
-
-    db.auth.getSession().then(function (result) {
-      var session = result.data && result.data.session;
-      if (session) showSignedIn(session.user);
-    });
   }
+  function loadWaiting() {
+    $("waitingStatus").textContent = "Loading…";
+    db.from("events").select("*").eq("status", "waiting").order("created_at", { ascending: true })
+      .then(function (res) {
+        var list = $("waitingList");
+        list.textContent = "";
+        if (res.error) { $("waitingStatus").textContent = "Couldn't load waiting posts: " + res.error.message; return; }
+        res.data.forEach(function (ev) {
+          var box = el("div", "review");
+          if (ev.status_reason) box.appendChild(el("p", "why", "Why it's waiting: " + ev.status_reason));
+          box.appendChild(el("p", "original", "Original post: " + ev.announcement));
+          var looked = memo(ev.agent_notes);
+          if (looked) box.appendChild(looked);
+          // Teach the agent while the post is fresh: the lesson is saved with the decision.
+          var teachLabel = el("label", "teach-inline");
+          teachLabel.appendChild(el("span", null, "Teach the agent something (optional)"));
+          var teachInput = el("input");
+          teachInput.type = "text"; teachInput.maxLength = 300;
+          teachInput.placeholder = "One sentence the agent should remember next time.";
+          teachLabel.appendChild(teachInput);
+          box.appendChild(teachLabel);
+          var approve = el("button", null, "Approve");
+          var reject = el("button", "ghost", "Reject");
+          approve.type = reject.type = "button";
+          function decideThen(status) {
+            var lesson = teachInput.value.trim();
+            if (lesson) { saveLesson(lesson, ev.id).then(function () { review(ev, status); }); return; }
+            review(ev, status);
+          }
+          approve.addEventListener("click", function () { decideThen("published"); });
+          reject.addEventListener("click", function () { decideThen("rejected"); });
+          var row = el("div", "actions-row");
+          row.appendChild(approve);
+          row.appendChild(reject);
+          box.appendChild(row);
+          var li = el("li");
+          li.appendChild(card(ev, box));
+          list.appendChild(li);
+        });
+        $("waitingCount").textContent = String(res.data.length);
+        $("waitingStatus").textContent = res.data.length ? res.data.length + " waiting" : "Nothing is waiting. Nice work.";
+      });
+  }
+  $("signInForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    $("signInMsg").textContent = "Signing in…";
+    db.auth.signInWithPassword({ email: $("modEmail").value.trim(), password: $("modPassword").value })
+      .then(function (res) {
+        $("modPassword").value = "";
+        // Show Supabase's own reason, such as "Invalid login credentials", so problems are easy to spot.
+        $("signInMsg").textContent = res.error ? "Sign-in didn't work: " + res.error.message : "";
+      })
+      .catch(function () { $("signInMsg").textContent = "Supabase couldn't be reached. Check your internet connection and try again."; });
+  });
+  $("signOutBtn").addEventListener("click", function () { db.auth.signOut(); });
+  db.auth.onAuthStateChange(function (_event, s) { session = s; renderMod(); });
+  db.auth.getSession().then(function (res) { session = res.data.session; renderMod(); });
 
-  loadEvents();
+  // Tools: clear the board. Every post goes; the club list and the lessons stay.
+  $("clearBtn").addEventListener("click", function () {
+    if (!window.confirm("Delete every post on the board? This can't be undone. The club list and the lessons stay.")) return;
+    $("toolsMsg").textContent = "Clearing…";
+    db.from("events").delete().not("id", "is", null).then(function (res) {
+      if (res.error) { $("toolsMsg").textContent = "Couldn't clear the board: " + res.error.message; return; }
+      $("toolsMsg").textContent = "The board is empty.";
+      toast("Board cleared");
+      loadWaiting(); loadBoard(true);
+    });
+  });
+
+  /* ---------- lessons: what moderators teach the agent ---------- */
+  function saveLesson(text, fromPost) {
+    return db.from("lessons").insert({ lesson: text.slice(0, 300), created_by: session.user.email, from_post: fromPost || null })
+      .then(function (res) {
+        $("teachMsg").textContent = res.error ? "Couldn't save the lesson: " + res.error.message : "Saved. The agent reads it with the next post.";
+        if (!res.error) toast("Lesson saved");
+        loadLessons();
+      });
+  }
+  function loadLessons() {
+    $("lessonsStatus").textContent = "Loading…";
+    db.from("lessons").select("*").order("created_at", { ascending: true })
+      .then(function (res) {
+        var list = $("lessonsList");
+        list.textContent = "";
+        if (res.error) { $("lessonsStatus").textContent = "Couldn't load the lessons: " + res.error.message; return; }
+        res.data.forEach(function (l) {
+          var li = el("li", "lesson" + (l.active ? "" : " off"));
+          var sw = el("label", "switch");
+          var box = el("input");
+          box.type = "checkbox"; box.checked = l.active;
+          box.setAttribute("aria-label", (l.active ? "Switch off: " : "Switch on: ") + l.lesson);
+          box.addEventListener("change", function () {
+            db.from("lessons").update({ active: box.checked }).eq("id", l.id).then(function (r) {
+              if (r.error) { $("lessonsStatus").textContent = "Couldn't change that: " + r.error.message; box.checked = !box.checked; return; }
+              toast(box.checked ? "Lesson on" : "Lesson off: the agent forgets it");
+              loadLessons();
+            });
+          });
+          sw.appendChild(box);
+          sw.appendChild(el("span", "knob"));
+          li.appendChild(sw);
+          var body = el("div", "lesson-body");
+          body.appendChild(el("p", "lesson-text", l.lesson));
+          body.appendChild(el("p", "lesson-meta", (l.active ? "On" : "Off, the agent no longer reads it") + (l.created_by ? " · by " + l.created_by : "") + " · " + new Date(l.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })));
+          li.appendChild(body);
+          list.appendChild(li);
+        });
+        var on = res.data.filter(function (l) { return l.active; }).length;
+        $("lessonsCount").textContent = String(on);
+        $("lessonsStatus").textContent = res.data.length ? on + " of " + res.data.length + " lesson" + (res.data.length === 1 ? "" : "s") + " switched on" : "No lessons yet. The agent follows only the posting rules.";
+      });
+  }
+  $("teachForm").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var text = $("lessonText").value.trim();
+    if (!text) return;
+    saveLesson(text, null).then(function () { $("lessonText").value = ""; });
+  });
+
+  loadBoard(false);
 })();

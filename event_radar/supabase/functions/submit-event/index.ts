@@ -108,6 +108,18 @@ function fail(message: string, status: number): Response {
   return json({ ok: false, message }, status);
 }
 
+// The chat message was already read and decided once; the reader says nothing back.
+function alreadyRead(): Response {
+  return json({
+    ok: true,
+    status: "duplicate",
+    already_read: true,
+    message: "This chat message was already read.",
+    reasons: [],
+    event: null,
+  });
+}
+
 // The new secret key comes from SUPABASE_SECRET_KEYS (JSON, "default" entry).
 function secretKey(): string {
   const keys = Deno.env.get("SUPABASE_SECRET_KEYS");
@@ -284,27 +296,45 @@ async function readCardWithOpenAI(key: string, announcement: string, flyer: Flye
   return JSON.parse(text) as Card;
 }
 
+// Where a post came from (Stage 14): a chat app's name, its message id, and the sender's name.
+type Source = { source: string; source_id: string; source_name: string };
+const NO_SOURCE: Source = { source: "", source_id: "", source_name: "" };
+
+function text(value: unknown, max: number): string {
+  return typeof value === "string" ? value.trim().slice(0, max) : "";
+}
+
 // Reads the announcement text and the optional flyer photo from a form or JSON body.
-async function readPost(req: Request): Promise<{ announcement: string; flyer: Flyer | null; error?: string }> {
+// A JSON body may also say which chat message it came from. Its "thread" is
+// accepted but not used yet (Stage 12 uses it).
+async function readPost(req: Request): Promise<{ announcement: string; flyer: Flyer | null; from: Source; error?: string }> {
   const type = req.headers.get("content-type") ?? "";
   try {
     if (type.includes("application/json")) {
       const body = await req.json();
-      return { announcement: typeof body?.announcement === "string" ? body.announcement : "", flyer: null };
+      return {
+        announcement: typeof body?.announcement === "string" ? body.announcement : "",
+        flyer: null,
+        from: {
+          source: text(body?.source, 40),
+          source_id: text(body?.source_id, 100),
+          source_name: text(body?.source_name, 100),
+        },
+      };
     }
     const form = await req.formData();
-    const text = form.get("announcement");
-    const announcement = typeof text === "string" ? text : "";
+    const value = form.get("announcement");
+    const announcement = typeof value === "string" ? value : "";
     const file = form.get("flyer");
-    if (!(file instanceof File) || file.size === 0) return { announcement, flyer: null };
+    if (!(file instanceof File) || file.size === 0) return { announcement, flyer: null, from: NO_SOURCE };
 
-    if (file.size > MAX_FLYER_BYTES) return { announcement, flyer: null, error: "The photo is over 5 MB. Please use a smaller one." };
+    if (file.size > MAX_FLYER_BYTES) return { announcement, flyer: null, from: NO_SOURCE, error: "The photo is over 5 MB. Please use a smaller one." };
     const bytes = new Uint8Array(await file.arrayBuffer());
     const kind = flyerType(bytes);
-    if (!kind) return { announcement, flyer: null, error: "The photo must be a JPG or PNG." };
-    return { announcement, flyer: { bytes, ...kind } };
+    if (!kind) return { announcement, flyer: null, from: NO_SOURCE, error: "The photo must be a JPG or PNG." };
+    return { announcement, flyer: { bytes, ...kind }, from: NO_SOURCE };
   } catch {
-    return { announcement: "", flyer: null };
+    return { announcement: "", flyer: null, from: NO_SOURCE };
   }
 }
 
@@ -330,6 +360,7 @@ Deno.serve(async (req: Request) => {
   const post = await readPost(req);
   if (post.error) return fail(post.error, 400);
   const flyer = post.flyer;
+  const from = post.from;
   const announcement = post.announcement.trim();
   const length = Array.from(announcement).length;
   if (length === 0) return fail("Please paste an announcement first.", 400);
@@ -338,6 +369,17 @@ Deno.serve(async (req: Request) => {
   const db = createClient(Deno.env.get("SUPABASE_URL") ?? "", secretKey(), {
     auth: { persistSession: false, autoRefreshToken: false },
   });
+
+  // A chat message gets one decision only. If it was read before, stop here (no AI call).
+  if (from.source && from.source_id) {
+    const { data: earlier, error: readError } = await db
+      .from("events").select("id").eq("source", from.source).eq("source_id", from.source_id).limit(1);
+    if (readError) {
+      console.error("Source check failed:", readError);
+      return fail("The website couldn't reach its database. Please try again in a minute.", 500);
+    }
+    if (earlier && earlier.length > 0) return alreadyRead();
+  }
 
   // Spending limit: at most 100 new posts in any 24 hours.
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -439,6 +481,9 @@ Deno.serve(async (req: Request) => {
     note_for_moderator: card.note_for_moderator ?? "",
     dedupe_key: dedupeKey,
     ai_model: ai.model,
+    source: from.source,
+    source_id: from.source_id,
+    source_name: from.source_name,
   };
 
   const { data: saved, error: insertError } = await db
@@ -448,6 +493,9 @@ Deno.serve(async (req: Request) => {
     .single();
 
   if (insertError) {
+    if (insertError.code === "23505" && insertError.message.includes("events_one_per_message")) {
+      return alreadyRead();
+    }
     if (insertError.code === "23505") {
       return json({
         ok: true,

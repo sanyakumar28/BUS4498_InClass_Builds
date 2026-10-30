@@ -156,8 +156,20 @@ async function sendToAgent(message: Message, thread: string[]): Promise<any> {
   }
 }
 
+// The reader's status: whether the secrets are set, and the bookmark.
+function status(cursor: Cursor | null) {
+  const { token, groupId, botId } = settings();
+  return {
+    ready: !!token && !!groupId,
+    last_message_id: cursor?.last_id || null,
+    read_count: cursor?.read_count ?? 0,
+    bot: !!botId,
+  };
+}
+
 // Asks GroupMe whether the token, the group, and the bot work. Results only, never values.
-async function check(): Promise<Response> {
+// The answer also carries the reader's status, so one check shows everything.
+async function check(cursor: Cursor | null): Promise<Response> {
   const { token, groupId, botId } = settings();
   const result: Record<string, string> = {
     token: token ? "set" : "missing: add GROUPME_TOKEN in Edge Functions → Secrets",
@@ -183,8 +195,16 @@ async function check(): Promise<Response> {
       else result.bot = `works: the bot “${bot.name}” can post in the group`;
     }
   }
-  const ok = result.group.startsWith("works") && !result.bot.startsWith("doesn't");
-  return json({ ok, check: SOURCE, ...result });
+  const works = result.group.startsWith("works") && !result.bot.startsWith("doesn't");
+  return json({
+    ok: true,
+    ...status(cursor),
+    check: SOURCE,
+    works,
+    token: result.token,
+    group: result.group,
+    bot_check: result.bot,
+  });
 }
 
 Deno.serve(async (req: Request) => {
@@ -204,14 +224,8 @@ Deno.serve(async (req: Request) => {
   const cursor: Cursor | null = row;
 
   if (req.method === "GET") {
-    if (new URL(req.url).searchParams.get("check") === SOURCE) return await check();
-    return json({
-      ok: true,
-      ready: !!token && !!groupId,
-      last_message_id: cursor?.last_id ?? null,
-      read_count: cursor?.read_count ?? 0,
-      bot: !!botId,
-    });
+    if (new URL(req.url).searchParams.get("check") === SOURCE) return await check(cursor);
+    return json({ ok: true, ...status(cursor) });
   }
 
   if (req.method !== "POST") return json({ ok: false, message: "Use GET or POST." }, 405);
